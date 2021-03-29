@@ -1,0 +1,18 @@
+# Ignore file for git repo
+
+*.DS_Store
+*.avi
+*.mp4
+*.log
+*.aux
+*.gz
+
+*.bbl
+*.blg
+*.nav
+*.out
+*.snm
+*.toc
+
+*.jld
+*.png
