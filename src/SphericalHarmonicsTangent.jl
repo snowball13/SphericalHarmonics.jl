@@ -1,17 +1,226 @@
+# Vector Spherical Harmonics as basis functions on the tangent space of the unit
+# sphere for a spectral method for solving PDEs
+
 #=
+NOTE
 
-Functions for determining the gradient and perpendicular gradient of spherical
-harmonics (OPs) on the unit sphere.
+    VOPs: Ψ_l^m(x,y,z) := ∇Ylm(x,y,z) = ∂ϕ(Ylm) ϕ̲ + (1/sinϕ) ∂θ(Ylm) θ̲
 
-The maths behind this stems from the gradient of a spherical harmonic (SH)
-is the sum of two vector spherical harmoncs (VSH). A VSH can be written as a
-sum of SHs with weights as Clebsch-Gorden coeffs times a vector (an
-eigenvector of S3).
-http://scipp.ucsc.edu/~haber/ph216/clebsch.pdf
+for l ∈ ℕ₀, m = -l,...,l
+
+where x = cosθ sinϕ, y = sinθ sinϕ, z = cosϕ; ρ(z) := sqrt(1-z^2) = sinϕ
 
 =#
 
-# include("SphericalHarmonicsScalar.jl")
+export SphericalHarmonicsTangentSpace
+
+function SphericalHarmonicsTangentSpace(fam::SphericalHarmonicsFamily{B,T,<:Any,<:Any}) where {B,T}
+    SphericalHarmonicsTangentSpace{typeof(fam), B, T}(fam)
+end
+
+spacescompatible(A::SphericalHarmonicsTangentSpace, B::SphericalHarmonicsTangentSpace) = true
+
+function gettangentspace(S::SphericalHarmonicsSpace{<:Any,B,T}) where {B,T}
+    D = S.family
+    if length(tangentspace) == 1
+        D.tangentspace[1]
+    elseif length(space) == 0
+        resize!(tangentspace, 1)
+        D.tangentspace[1] = SphericalHarmonicsTangentSpace(D)
+    else
+        error("tangentspace should be a vector of length 1 or 0")
+    end
+end
+
+getSHSpace(S::SphericalHarmonicsTangentSpace) = S.family()
+
+#===#
+# Recurrence coefficients/Jacobi matrix entries
+
+
+function jacobiderivativecoeff(::Type{T}, S::SphericalHarmonicsTangentSpace,
+                                l::Int, m::Int) where T
+    """ Returns the coefficient d_{l,m} where
+    dz(P^{(|m|,|m|)}_{l-|m|}(z)) = d_{l,m} P^{(|m|+1,|m|+1)}_{l-|m|-1}(z)
+
+    """
+
+    (T(1) / 2) * (l + abs(m) + 1)
+end
+jacobiderivativecoeff(::Type{T}, S::SphericalHarmonicsSpace, l::Int, m::Int) where T =
+    jacobiderivativecoeff(T, gettangentspace(S), l, m)
+function getrecÃ(::Type{T}, ST::SphericalHarmonicsTangentSpace,
+                    l::Int, m::Int, j::Int) where T
+    """ Returns the Ã_{l,m,j} value for j = 1,2,3,4 """
+
+    SH = getSHspace(ST)
+    ret = T(0)
+    if j == 1
+        ret += ((m^2 - 1) * getrecα̃(T, SH, l-1, m-1, 4)
+                - jacobiderivativecoeff(T, ST, l-1, m-1) * getrecγ̃(T, SH, l-1, m, 2))
+        ret /= getnormalisingconstant(T, SH, l, m)^2
+        ret += (jacobiderivativecoeff(T, ST, l, m)
+                * jacobiderivativecoeff(T, ST, l-1, m-1)
+                * getrecα̃(T, SH, l, m+1, 1)
+                / getnormalisingconstant(T, SH, l-1, m)^2)
+    elseif j == 2
+        ret += (m * (m+2) * getrecα̃(T, SH, l, m, 2)
+                - jacobiderivativecoeff(T, ST, l, m) * getrecγ̃(T, SH, l, m+1, 1))
+        ret /= getnormalisingconstant(T, SH, l-1, m+1)^2
+        ret += (jacobiderivativecoeff(T, ST, l, m)
+                * jacobiderivativecoeff(T, ST, l-1, m+11)
+                * getrecα̃(T, SH, l-1, m+2, 3)
+                / getnormalisingconstant(T, SH, l, m+1)^2)
+    elseif j == 3
+        ret += ((m^2 - 1) * getrecα̃(T, SH, l+1, m-1, 2)
+                - jacobiderivativecoeff(T, ST, l+1, m-1) * getrecγ̃(T, SH, l+1, m, 1))
+        ret /= getnormalisingconstant(T, SH, l, m)^2
+        ret += (jacobiderivativecoeff(T, ST, l, m)
+                * jacobiderivativecoeff(T, ST, l+1, m-1)
+                * getrecα̃(T, SH, l, m+1, 3)
+                / getnormalisingconstant(T, SH, l+1, m)^2)
+    elseif j == 4
+        ret += (m * (m+2) * getrecα̃(T, SH, l, m, 4)
+                - jacobiderivativecoeff(T, ST, l, m) * getrecγ̃(T, SH, l, m+1, 2))
+        ret /= getnormalisingconstant(T, SH, l+1, m+1)^2
+        ret += (jacobiderivativecoeff(T, ST, l, m)
+                * jacobiderivativecoeff(T, ST, l+1, m+1)
+                * getrecα̃(T, SH, l+1, m+2, 1)
+                / getnormalisingconstant(T, SH, l, m+1)^2)
+    else
+        error("Invalid Ã coeff being requested")
+    end
+    ret
+end
+function getrecΓ̃(::Type{T}, ST::SphericalHarmonicsTangentSpace,
+                    l::Int, m::Int, j::Int) where T
+    """ Returns the coeff, Γ̃_{l,m,j}, value for j = 1,2,3 """
+
+    SH = getSHspace(ST)
+    ret = T(0)
+    mm = abs(m)
+    if j == 1
+        ret += (mm * (mm + 2) * getrecγ(T, SH, l, mm, 1)
+                / getnormalisingconstant(T, SH, l-1, mm)^2)
+        ret += (jacobiderivativecoeff(T, ST, l, mm)
+                * jacobiderivativecoeff(T, ST, l-1, m)
+                * getrecγ(T, SH, l, mm+1, 1)
+                / getnormalisingconstant(T, SH, l-1, mm+1)^2)
+    elseif j == 2
+        ret += (mm * (mm + 2) * getrecγ(T, SH, l, mm, 2)
+                / getnormalisingconstant(T, SH, l+1, mm)^2)
+        ret += (jacobiderivativecoeff(T, ST, l, mm)
+                * jacobiderivativecoeff(T, ST, l+1, m)
+                * getrecγ(T, SH, l, mm+1, 2)
+                / getnormalisingconstant(T, SH, l+1, mm+1)^2)
+    elseif j == 3
+        ret += (-1)^m * im * m
+    else
+        error("Invalid Γ̃ coeff being requested")
+    end
+    ret
+end
+function recA(::Type{T}, S::SphericalHarmonicsTangentSpace, l::Int, m::Int, j::Int) where T
+    """ Returns the mult by x coeff, A_{l,m,j}, value for j = 1,...,6 """
+
+    SH = getSHspace(S)
+    ret = T(0)
+    if j == 1
+        if m > 0
+            ret += getrecÃ(T, S, l, m, 1)
+        else
+            ret += getrecÃ(T, S, l, abs(m), 2)
+        end
+        ret *= (getnormalisingconstant(T, SH, l, m)
+                * getnormalisingconstant(T, SH, l-1, m-1))
+        ret /= 2 * l * (l-1)
+    elseif j == 2
+        if m ≥ 0
+            ret += getrecÃ(T, S, l, m, 2)
+        else
+            ret += getrecÃ(T, S, l, abs(m), 1)
+        end
+        ret *= (getnormalisingconstant(T, SH, l, m)
+                * getnormalisingconstant(T, SH, l-1, m+1))
+        ret /= 2 * l * (l-1)
+    elseif j == 3
+        if m > 0
+            ret += getrecÃ(T, S, l, m, 3)
+        else
+            ret += getrecÃ(T, S, l, abs(m), 4)
+        end
+        ret *= (getnormalisingconstant(T, SH, l, m)
+                * getnormalisingconstant(T, SH, l-1, m-1)) # NOTE Check this - should it be l+1???
+        ret /= 2 * (l+1) * (l+2)
+    elseif j == 4
+        if m ≥ 0
+            ret += getrecÃ(T, S, l, m, 4)
+        else
+            ret += getrecÃ(T, S, l, abs(m), 3)
+        end
+        ret *= (getnormalisingconstant(T, SH, l, m)
+                * getnormalisingconstant(T, SH, l-1, m+1)) # NOTE Check this - should it be l+1???
+        ret /= 2 * (l+1) * (l+2)
+    elseif j == 5
+        if m > 0
+            ret -= (im
+                    * jacobiderivativecoeff(T, S, l, m-1)
+                    * getnormalisingconstant(T, SH, l, m-1)
+                    / (2 * getnormalisingconstant(T, SH, l, m))
+        else
+            ret += ((-1)^m * im
+                    * jacobiderivativecoeff(T, S, l, m)
+                    * getnormalisingconstant(T, SH, l, m)
+                    / (2 * getnormalisingconstant(T, SH, l, m-1))
+        end
+        ret /= l * (l+1)
+    elseif j == 6
+        if m ≥ 0
+            ret -= (im
+                    * jacobiderivativecoeff(T, S, l, m)
+                    * getnormalisingconstant(T, SH, l, m)
+                    / (2 * getnormalisingconstant(T, SH, l, m+1))
+        else
+            ret += ((-1)^(m+1) * im
+                    * jacobiderivativecoeff(T, S, l, abs(m)-1)
+                    * getnormalisingconstant(T, SH, l, m+1)
+                    / (2 * getnormalisingconstant(T, SH, l, m))
+        end
+        ret /= l * (l+1)
+    else
+        error("Invalid A or B coeff being requested")
+    end
+    ret
+end
+function recB(::Type{T}, S::SphericalHarmonicsTangentSpace, l::Int, m::Int, j::Int) where T
+    """ Returns the mult by y coeff, B_{l,m,j}, value for j = 1,2,3,4 """
+
+    (-1)^(j+1) * im * recA(T, S, l, m, j)
+end
+function recΓ(::Type{T}, S::SphericalHarmonicsTangentSpace, l::Int, m::Int, j::Int) where T
+    """ Returns the mult by z coeff, Γ_{l,m,j}, value for j = 1,2,3 """
+
+    @assert (j == 1 || j == 2 || j == 3) "Invalid Γ coeff being requested"
+    ret = getrecΓ̃(T, S, l, m, j)
+    if j == 1
+        ret *= (getnormalisingconstant(T, S, l, m)
+                * getnormalisingconstant(T, S, l-1, m)
+                / (l * (l-1))
+    elseif j == 2
+        ret *= (getnormalisingconstant(T, S, l, m)
+                * getnormalisingconstant(T, S, l+1, m)
+                / ((l+1) * (l+2))
+    else
+        ret /= l * (l+1)
+    end
+    ret
+end
+
+
+
+
+
+#========#
 
 
 let
