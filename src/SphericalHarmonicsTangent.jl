@@ -217,6 +217,273 @@ function recΓ(::Type{T}, S::SphericalHarmonicsTangentSpace, l::Int, m::Int, j::
 end
 
 
+#===#
+# Function evaluation (clenshaw)
+
+#=
+NOTE
+The Clenshaw matrices are stored by degree (and not by Fourier mode k).
+This makes the Clenshaw algorithm much easier.
+We will just need to reorder/take into account the fact that the coeffs are
+stored by Fourier mode (and not degree) in the calculations.
+
+OR since constructing/storing these takes a looong time, we do the clenshaw alg
+when needed *not* using the clenshaw matrices.
+=#
+
+function getclenshawsubblockx(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any},
+                                l::Int; subblock::String="A") where T
+    """ Returns the Jacobi matrix subblock A_{x,l}, B_{x,l}, C_{x,l} """
+
+    @assert subblock in ("A", "B", "C") "Invalid subblock given"
+    @assert n ≥ 0 "Invalid n - should be non-negative integer"
+
+    if subblock == "A"
+        bandn = 1
+        mat = spzeros(2l+1, 2l+1+band)
+        for i = 1:2l+1
+            mat[i,i] = recα(T, S, l, -l+i-1, 3)
+            mat[i,i+2] = recα(T, S, l, -l+i-1, 4)
+        end
+    elseif subblock == "B"
+        mat = spzeros(2l+1, 2l+1)
+    else
+        bandn = -1
+        n == 0 && error("n needs to be > 0 when Clenshaw mat C requested")
+        mat = spzeros(2l+1, 2l+1+band)
+        for i = 1:2l-1
+            mat[i,i] = recα(T, S, l, -l+i-1, 2)
+            mat[i+2,i] = recα(T, S, l, -l+i+1, 1)
+        end
+    end
+    mat
+end
+function getclenshawsubblocky(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any},
+                                l::Int; subblock::String="A") where T
+    """ Returns the Jacobi matrix subblock A_{y,l}, B_{y,l}, C_{y,l} """
+
+    @assert subblock in ("A", "B", "C") "Invalid subblock given"
+    @assert n ≥ 0 "Invalid n - should be non-negative integer"
+
+    if subblock == "A"
+        bandn = 1
+        mat = spzeros(2l+1, 2l+1+band)
+        for i = 1:2l+1
+            mat[i,i] = recβ(T, S, l, -l+i-1, 3)
+            mat[i,i+2] = recβ(T, S, l, -l+i-1, 4)
+        end
+    elseif subblock == "B"
+        mat = spzeros(2l+1, 2l+1)
+    else
+        bandn = -1
+        n == 0 && error("n needs to be > 0 when Clenshaw mat C requested")
+        mat = spzeros(2l+1, 2l+1+band)
+        for i = 1:2l-1
+            mat[i,i] = recβ(T, S, l, -l+i-1, 2)
+            mat[i+2,i] = recβ(T, S, l, -l+i+1, 1)
+        end
+    end
+    mat
+end
+function getclenshawsubblockz(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any},
+                                l::Int; subblock::String="A") where T
+    """ Returns the Jacobi matrix subblock A_{z,l}, B_{z,l}, C_{z,l} """
+
+    @assert subblock in ("A", "B", "C") "Invalid subblock given"
+    @assert n ≥ 0 "Invalid n - should be non-negative integer"
+
+    if subblock == "A"
+        bandn = 1
+        mat = spzeros(2l+1, 2l+1+band)
+        for i = 1:2l+1
+            mat[i,i+1] = recα(T, S, l, -l+i-1, 2)
+        end
+    elseif subblock == "B"
+        mat = spzeros(2l+1, 2l+1)
+    else
+        bandn = -1
+        n == 0 && error("n needs to be > 0 when Clenshaw mat C requested")
+        mat = spzeros(2l+1, 2l+1+band)
+        for i = 1:2l-1
+            mat[i+1,i] = recα(T, S, l, -l+i, 1)
+        end
+    end
+    mat
+end
+
+# NOTE Each of these """ Computes and stores the Jacobi matrix blocks up to deg N """
+function getBs!(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}, N, N₀) where T
+    m = N₀
+    resize!(S.B, N + 1)
+    subblock = "B"
+    for n = N:-1:m
+        S.B[n+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
+        resize!(S.B[n+1], 3)
+        S.B[n+1][1] = getclenshawsubblockx(S, n; subblock=subblock)
+        S.B[n+1][2] = getclenshawsubblocky(S, n; subblock=subblock)
+        S.B[n+1][3] = getclenshawsubblockz(S, n; subblock=subblock)
+    end
+    S
+end
+function getCs!(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}, N, N₀) where T
+    m = N₀
+    resize!(S.C, N + 1)
+    subblock = "C"
+    if N₀ == 0
+        m += 1 # C_0 does not exist
+    end
+    for n = N:-1:m
+        S.C[n+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
+        resize!(S.C[n+1], 3)
+        S.C[n+1][1] = getclenshawsubblockx(S, n; subblock=subblock)
+        S.C[n+1][2] = getclenshawsubblocky(S, n; subblock=subblock)
+        S.C[n+1][3] = getclenshawsubblockz(S, n; subblock=subblock)
+    end
+    S
+end
+function getAs!(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}, N, N₀) where T
+    m = N₀
+    resize!(S.A, N + 1)
+    subblock = "A"
+    for n = N:-1:m
+        S.A[n+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
+        resize!(S.A[n+1], 3)
+        S.A[n+1][1] = getclenshawsubblockx(S, n; subblock=subblock)
+        S.A[n+1][2] = getclenshawsubblocky(S, n; subblock=subblock)
+        S.A[n+1][3] = getclenshawsubblockz(S, n; subblock=subblock)
+    end
+    S
+end
+
+function getDTs!(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}, N, N₀) where T
+    """ Computes and stores Blocks that make up the matrix Dᵀ_l
+
+    # Need to store these as BandedBlockBandedMatrices for each subblock
+    # corresponding to x,y,z.
+    # i.e. We store [DT_{x,n}, DT_{y,n}, DT_{z,n}] where
+    #    I = DTn*An = DT_{x,n}*A_{x,n} + DT_{y,n}*A_{y,n} + DT_{z,n}*A_{z,n}
+    """
+
+    previousN = N₀
+    resize!(S.DT, N + 1)
+    if m == 0
+        l = 0
+        S.DT[l+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
+        resize!(S.DT[n+1], 3)
+        denom = (recα(T, S, l, l, 3) * recβ(T, S, l, l, 4)
+                    - recα(T, S, l, l, 4) * recβ(T, S, l, l, 3))
+
+        S.DT[l+1][1] = spzeros(2l+3, 2l+1)
+        S.DT[l+1][1][1,1] = - recα(T, S, l, l, 4) / denom
+        S.DT[l+1][1][3,1] = - recα(T, S, l, l, 3) / denom
+
+        S.DT[l+1][3] = spzeros(2l+3, 2l+1)
+        S.DT[l+1][3][1,1] = recβ(T, S, l, l, 4) / denom
+        S.DT[l+1][3][3,1] = - recβ(T, S, l, l, 3) / denom
+
+        S.DT[l+1][3] = spzeros(2l+3, 2l+1)
+        S.DT[l+1][3][2,1] = 1 / recγ(T, S, l, l, 2)
+
+        previousN += 1
+    end
+    for l = N:-1:previousN
+        S.DT[l+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
+        resize!(S.DT[l+1], 3)
+
+        # Define
+        S.DT[l+1][1] = spzeros(2l+3, 2l+1)
+        α3, α4 = recα(T, S, l, -l, 3), recα(T, S, l, l, 4)
+        S.DT[l+1][1][1, 1] = 1 / α3
+        S.DT[l+1][1][2l+3, 2l+1] = 1 / α4
+
+        S.DT[l+1][2] = spzeros(2l+3, 2l+1)
+
+        S.DT[l+1][3] = spzeros(2l+3, 2l+1)
+        Dz = S.DT[l+1][3]
+        Dz[1, 2] = - recα(T, S, l, -l, 4) / (α3 * recγ(T, S, l, -l+1, 2))
+        m = -l
+        for i = 1:2l+1
+            Dz[i+1, i] = 1 / recγ(T, S, l, m, 2)
+            m += 1
+        end
+        Dz[2l+3, end-1] = - recα(T, S, l, l, 3) / (α4 * recγ(T, S, l, l-1, 2))
+    end
+    S
+end
+
+function resizedata!(S::SphericalHarmonicsTangentSpace, N)
+    """ Resizes the data of S - that is, stores the Clenshaw (Recurrence)
+    matrices up to degree N
+    """
+
+    N₀ = length(S.C)
+    N ≤ N₀ - 2 && return S
+    @show "begin resizedata! for SphericalHarmonicsTangentSpace", N
+
+    getAs!(S, N+1, N₀)
+    @show "done As"
+    # getBs!(S, N+1, N₀) # NOTE Bs are just square zero blocks
+    # @show "done Bs"
+    getCs!(S, N+1, N₀)
+    @show "done Cs"
+    getDTs!(S, N+1, N₀)
+    @show "done DTs"
+    S
+end
+
+
+function clenshawDTBmG(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}, l::Int,
+                        ξ::AbstractArray{R}, x::R, y::R, z::R) where {T,R}
+    """ Returns Vector corresponding to ξ * DlT * (Bl - Gl(x,y,z)) """
+
+    - ξ * (S.DT[l+1][1] * x + S.DT[l+1][2] * y + S.DT[l+1][3] * z)
+end
+function clenshawDTC(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}, l::Int,
+                        ξ::AbstractArray{R}) where {T,R}
+    """ Returns Vector corresponding to ξ * DlT * Cl """
+
+    ξ * (S.DT[l+1][1] * S.C[l+1][1]
+            + S.DT[l+1][2] * S.C[l+1][2]
+            + S.DT[l+1][3] * S.C[l+1][3])
+end
+function clenshaw(cfs::AbstractVector{T},
+                    S::SphericalHarmonicsTangentSpace,
+                    x::R, y::R, z::R) where {T,R}
+    """ Implements the Clenshaw algorithm to evaluate a function given by its
+    expansion coeffs in the SH OP basis
+
+    NOTE for now, we simply implement with the clenshaw mats as required.
+    It could be made more efficient.
+    """
+
+    M = length(cfs)
+    N = Int(sqrt(M)) - 1 # Degree
+    resizedata!(S, N+1)
+    f = PseudoBlockArray(cfs, [2n+1 for n=0:N])
+
+    P0 = getdegzeropteval(T, S)
+    if N == 0
+        return f[1] * P0
+    end
+    ξ2 = view(f, Block(N+1))'
+    ξ1 = view(f, Block(N))' - clenshawDTBmG(S, N-1, ξ2, x, y, z)
+    for n = N-2:-1:0
+        ξ = (view(f, Block(n+1))'
+                - clenshawDTBmG(S, n, ξ1, x, y, z)
+                - clenshawDTC(S, n+1, ξ2))
+        ξ2 = copy(ξ1)
+        ξ1 = copy(ξ)
+    end
+    (ξ1 * P0)[1]
+end
+clenshaw(cfs::AbstractVector, S::SphericalHarmonicsTangentSpace, z) =
+    clenshaw(cfs, S, z[1], z[2], z[3])
+evaluate(cfs::AbstractVector, S::SphericalHarmonicsTangentSpace, z) =
+    clenshaw(cfs, S, z)
+evaluate(cfs::AbstractVector, S::SphericalHarmonicsTangentSpace, x, y, z) =
+    clenshaw(cfs, S, x, y, z)
+
+
 
 
 
