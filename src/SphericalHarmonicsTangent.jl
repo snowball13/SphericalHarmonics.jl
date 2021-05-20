@@ -5,10 +5,16 @@
 NOTE
 
     VOPs: Ψ_l^m(x,y,z) := ∇Ylm(x,y,z) = ∂ϕ(Ylm) ϕ̲ + (1/sinϕ) ∂θ(Ylm) θ̲
+          Φ_l^m(x,y,z) := ∇⟂Ylm(x,y,z) = - ∂ϕ(Ylm) θ̲ + (1/sinϕ) ∂θ(Ylm) ϕ̲
+                        = r̲ × ∇Ylm(x,y,z)
 
 for l ∈ ℕ₀, m = -l,...,l
 
 where x = cosθ sinϕ, y = sinθ sinϕ, z = cosϕ; ρ(z) := sqrt(1-z^2) = sinϕ
+ and ϕ̲ := [cosθ cosϕ; sinθ cosϕ; -sinϕ]
+     θ̲ := [-sinθ; cosθ; 0]
+
+Throughout, kind refers to either Ψ_l^m (kind=0) or Φ_l^m (kind=1)
 
 =#
 
@@ -20,7 +26,7 @@ function SphericalHarmonicsTangentSpace(fam::SphericalHarmonicsFamily{B,T,<:Any}
         Vector{Vector{BandedBlockBandedMatrix{B}}}(),
         Vector{Vector{BandedBlockBandedMatrix{B}}}(),
         Vector{Vector{BandedBlockBandedMatrix{B}}}(),
-        Vector{Vector{SparseMatrixCSC{B}}}())
+        Vector{Vector{BandedBlockBandedMatrix{B}}}())
 end
 
 spacescompatible(A::SphericalHarmonicsTangentSpace, B::SphericalHarmonicsTangentSpace) = true
@@ -40,46 +46,88 @@ end
 getSHspace(S::SphericalHarmonicsTangentSpace) = S.family()
 
 function getorderonepteval(::Type{T}, S::SphericalHarmonicsTangentSpace,
-                            x::R, y::R, z::R,
-                            type::String="psi", m::Int=0) where {T,R}
+                            x::Real, y::Real, z::Real, m::Int, kind::Int) where T
     """ Returns the Ψ/Φ VSH OP evaluated at (x,y,z) for l = 1, m = m.
+
+    kind - 0=Ψ, 1=Φ
 
     im is the imaginary number i. m is simply 0 or ±1.
     """
 
-    @assert in(type, ("psi", "phi")) "Invalid type of VSH asked for"
+    @assert in(kind, (0, 1)) "Invalid type of VSH asked for"
     @assert in(m, (0, 1, -1)) "Invalid order 1 VSH asked for (m should be 0, ±1)"
 
-    if type == "psi"
+    if kind == 0 # "Psi"
         if m == 0
             ret = [-x*z; -y*z; -z^2 + 1]
         else
             ret = [1 - x^2 - m*im*x*y; -x*y + m*im*(1 - y^2); -z*(x + m*im*y)]
         end
-    else
+    else # Phi
         if m == 0
             ret = [y; -x; 0]
         else
             ret = [-m*im*z; z; -y + m*im*x]
         end
     end
-    ret * getnormalisingconstant(T, getSCspace(S), 1, m)
+    ret * getnormalisingconstant(T, getSHspace(S), 1, m)
 end
 function orderonepteval(S::SphericalHarmonicsTangentSpace{<:Any, B, <:Any},
-                        x::R, y::R, z::R,
-                        cfs::AbstractArray{T}) where {B,R,T}
+                        x::Real, y::Real, z::Real, cfs::AbstractArray) where B
     """ Returns the result of the dot product of the cfs vector (length=6) with
     the order l=1 VSH OPs, yeilding a dim=3 vector.
     """
 
     ret = zeros(B, 3)
-    types = ("psi", "phi")
     ind = 1
-    for tp in types, m = -1:1
-        ret += cfs[ind] * getorderonepteval(B, S, x, y, z)
+    for m = -1:1, kind = 0:1
+        ret += cfs[ind] * getorderonepteval(B, S, x, y, z, m, kind)
         ind += 1
     end
     ret
+end
+
+
+#===#
+# Indexing retrieval methods
+function getopindex(S::SphericalHarmonicsTangentSpace, l::Int, m::Int, kind::Int)
+    """ Method to return the index (of a vector) corresponding to the VSH OP
+    requested by the trio l, m and kind.
+    """
+
+    @assert (abs(m) ≤ l && in(kind, (0,1))) "Invalid inputs to getopindex"
+    l^2 + l + m + 1
+
+    # Sum of the number of OPs up to and including order l-1
+    ret = 2 * l^2
+    # Now count from the beginning of the order l OPs
+    ret += 2(l + m) + 1 + kind
+    ret
+end
+function getlmkind(S::SphericalHarmonicsTangentSpace, ind::Int)
+    """ Method to return the corresponding VSH OP (l,m orders and the kind),
+    given the index (of a vector)
+    """
+
+    # loop to find order l
+    l = 0
+    while true
+        if 2(l+1)^2 ≥ ind
+            break
+        end
+        l += 1
+    end
+    # reverse "remainder = 2(l + m) + 1 + kind" to find m and kind
+    remainder = ind - l^2
+    mprovisional = - l + (remainder - 1 - kind) / 2
+    if round(mprovisional) == mprovisional
+        m = Int(mprovisional)
+        kind = 0
+    else
+        m = Int(mprovisional - 0.5)
+        kind = 1
+    end
+    l, m, kind
 end
 
 
@@ -180,7 +228,7 @@ function getrecΓ̃(::Type{T}, ST::SphericalHarmonicsTangentSpace,
                     / getnormalisingconstant(T, SH, l+1, mm+1)^2)
         end
     elseif j == 3
-        ret += (-1)^m * im * m
+        ret += im * m
     else
         error("Invalid Γ̃ coeff being requested")
     end
@@ -244,26 +292,33 @@ function recA(::Type{T}, S::SphericalHarmonicsTangentSpace, l::Int, m::Int, j::I
                     * getnormalisingconstant(T, SH, l, m-1)
                     / (2 * getnormalisingconstant(T, SH, l, m)))
         else
-            ret += ((-1)^m * im
+            ret += (im
                     * jacobiderivativecoeff(T, S, l, m)
                     * getnormalisingconstant(T, SH, l, m)
                     / (2 * getnormalisingconstant(T, SH, l, m-1)))
+            # ret += ((-1)^m * im
+            #         * jacobiderivativecoeff(T, S, l, m)
+            #         * getnormalisingconstant(T, SH, l, m)
+            #         / (2 * getnormalisingconstant(T, SH, l, m-1)))
         end
         ret /= l * (l+1)
     elseif j == 6
         l < abs(m+1) && return ret
         if m ≥ 0
-            ret -= (im
-                    * jacobiderivativecoeff(T, S, l, m)
+            ret -= (jacobiderivativecoeff(T, S, l, m)
                     * getnormalisingconstant(T, SH, l, m)
-                    / (2 * getnormalisingconstant(T, SH, l, m+1)))
+                    / getnormalisingconstant(T, SH, l, m+1))
         else
-            ret += ((-1)^(m+1) * im
-                    * jacobiderivativecoeff(T, S, l, abs(m)-1)
+            ret += (jacobiderivativecoeff(T, S, l, abs(m)-1)
                     * getnormalisingconstant(T, SH, l, m+1)
-                    / (2 * getnormalisingconstant(T, SH, l, m)))
+                    / getnormalisingconstant(T, SH, l, m))
+            # ret += ((-1)^(m+1) * im
+            #         * jacobiderivativecoeff(T, S, l, abs(m)-1)
+            #         * getnormalisingconstant(T, SH, l, m+1)
+            #         / (2 * getnormalisingconstant(T, SH, l, m)))
         end
-        ret /= l * (l+1)
+        ret /= 2 * l * (l+1)
+        ret *= im
     else
         error("Invalid A or B coeff being requested")
     end
@@ -398,7 +453,7 @@ function getclenshawsubblocky(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}
                 (2, 0), (0, 0))
         for i = 1:2l-1
             view(mat, Block(i, i)) .+= recB(T, S, l, -l+i-1, 2) * subblockmat
-            view(mat, Block(i+2, i)) .+= recB(T, S, l, -l+i-1, 1) * subblockmat
+            view(mat, Block(i+2, i)) .+= recB(T, S, l, -l+i+1, 1) * subblockmat
         end
     end
     mat
@@ -492,69 +547,113 @@ end
 function getDTs!(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}, N, N₀) where T
     """ Computes and stores Blocks that make up the matrix Dᵀ_l
 
+
     # Need to store these as BandedBlockBandedMatrices for each subblock
     # corresponding to x,y,z.
     # i.e. We store [DT_{x,n}, DT_{y,n}, DT_{z,n}] where
     #    I = DTn*An = DT_{x,n}*A_{x,n} + DT_{y,n}*A_{y,n} + DT_{z,n}*A_{z,n}
+
+    Note that the DT_{y,n} are all zero matrices and so are not stored.
     """
 
     previousN = N₀
     resize!(S.DT, N + 1)
     if previousN == 0
-        l = 0
-        S.DT[l+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
-        resize!(S.DT[l+1], 3)
-        A3, A4 = recA(T, S, l, l, 3), recA(T, S, l, l, 4)
-        B3, B4 = recB(T, S, l, l, 3), recB(T, S, l, l, 4)
-        denom = A3 * B4 - A4 * B3
-
-        S.DT[l+1][1] = spzeros(T, 2(2l+3), 2(2l+1))
-        Dx = S.DT[l+1][1]
-        Dx[1,1] = B4 / denom; Dx[2,2] = B4 / denom
-        Dx[5,1] = -B3 / denom; Dx[6,2] = -B3 / denom
-
-        S.DT[l+1][2] = spzeros(T, 2(2l+3), 2(2l+1))
-        Dy = S.DT[l+1][2]
-        Dy[1,1] = -A4 / denom; Dx[2,2] = -A4 / denom
-        Dy[5,1] = A3 / denom; Dx[6,2] = A3 / denom
-
-        S.DT[l+1][3] = spzeros(T, 2(2l+3), 2(2l+1))
-        Dz = S.DT[l+1][3]
-        ent = 1 / recΓ(T, S, l, l, 2)
-        Dz[3,1] = ent; Dz[4,2] = ent
-
-        previousN += 1
+        previousN += 1 # DT_0 are simply zero
     end
     for l = N:-1:previousN
-        S.DT[l+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
-        resize!(S.DT[l+1], 3)
 
-        # Define
-        S.DT[l+1][1] = spzeros(T, 2(2l+3), 2(2l+1))
+        S.DT[l+1] = Vector{BandedBlockBandedMatrix{T}}(undef, 3)
+        resize!(S.DT[l+1], 3)
+        subblockmat = sparse(T(1)I, 2, 2)
+        band = 1
+
+        # DT_x
+        S.DT[l+1][1] = BandedBlockBandedMatrix(
+                            Zeros{T}(2(2(l+band)+1), 2(2l+1)),
+                            [2 for m=-(l+band):(l+band)], [2 for m=-l:l],
+                            (2, 0), (0, 0))
         Dx = S.DT[l+1][1]
         A3, A4 = recA(T, S, l, -l, 3), recA(T, S, l, l, 4)
-        Dx[1, 1] = 1 / A3; Dx[2, 2] = 1 / A3
-        Dx[end-1, end-1] = 1 / A4; Dx[end, end] = 1 / A4
+        view(Dx, Block(1, 1)) .= (1 / A3) * subblockmat
+        view(Dx, Block(2l+3, 2l+1)) .= (1 / A4) * subblockmat
 
-        S.DT[l+1][2] = spzeros(T, 2(2l+3), 2(2l+1))
-
-        S.DT[l+1][3] = spzeros(T, 2(2l+3), 2(2l+1))
+        # DT_z
+        S.DT[l+1][3] = BandedBlockBandedMatrix(
+                            Zeros{T}(2(2(l+band)+1), 2(2l+1)),
+                            [2 for m=-(l+band):(l+band)], [2 for m=-l:l],
+                            (3, 1), (0, 0))
         Dz = S.DT[l+1][3]
-        ent = - recA(T, S, l, -l, 4) / (A3 * recΓ(T, S, l, -l+1, 2))
-        Dz[1, 3] = ent; Dz[2, 4] = ent
-        offset = 2
-        ind = 1
+        view(Dz, Block(1, 2)) .= (- recA(T, S, l, -l, 4) / (A3 * recΓ(T, S, l, -l+1, 2))) * subblockmat
+        blk = 1
         for m = -l:l
             c = recΓ(T, S, l, m, 2)
-            for i = 1:2
-                Dz[offset+ind, ind] = 1 / c
-                ind += 1
-            end
+            view(Dz, Block(blk+1, blk)) .= (1 / c) * subblockmat
+            blk += 1
         end
-        ent = - recA(T, S, l, l, 3) / (A4 * recΓ(T, S, l, l-1, 2))
-        Dz[end-1, end-5] = ent; Dz[end, end-4] = ent
+        view(Dz, Block(2l+3, 2l)) .= (- recA(T, S, l, l, 3) / (A4 * recΓ(T, S, l, l-1, 2))) * subblockmat
     end
     S
+
+    # previousN = N₀
+    # resize!(S.DT, N + 1)
+    # if previousN == 0
+    #     l = 0
+    #     S.DT[l+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
+    #     resize!(S.DT[l+1], 3)
+    #     A3, A4 = recA(T, S, l, l, 3), recA(T, S, l, l, 4)
+    #     B3, B4 = recB(T, S, l, l, 3), recB(T, S, l, l, 4)
+    #     denom = A3 * B4 - A4 * B3
+    #
+    #     S.DT[l+1][1] = spzeros(T, 2(2l+3), 2(2l+1))
+    #     Dx = S.DT[l+1][1]
+    #     Dx[1,1] = B4 / denom; Dx[2,2] = B4 / denom
+    #     Dx[5,1] = -B3 / denom; Dx[6,2] = -B3 / denom
+    #
+    #     S.DT[l+1][2] = spzeros(T, 2(2l+3), 2(2l+1))
+    #     Dy = S.DT[l+1][2]
+    #     Dy[1,1] = -A4 / denom; Dx[2,2] = -A4 / denom
+    #     Dy[5,1] = A3 / denom; Dx[6,2] = A3 / denom
+    #
+    #     S.DT[l+1][3] = spzeros(T, 2(2l+3), 2(2l+1))
+    #     Dz = S.DT[l+1][3]
+    #     ent = 1 / recΓ(T, S, l, l, 2)
+    #     Dz[3,1] = ent; Dz[4,2] = ent
+    #
+    #     previousN += 1
+    # end
+    # for l = N:-1:previousN
+    #     S.DT[l+1] = Vector{SparseMatrixCSC{T}}(undef, 3)
+    #     resize!(S.DT[l+1], 3)
+    #
+    #     # Define
+    #     S.DT[l+1][1] = spzeros(T, 2(2l+3), 2(2l+1))
+    #     Dx = S.DT[l+1][1]
+    #     A3, A4 = recA(T, S, l, -l, 3), recA(T, S, l, l, 4)
+    #     Dx[1, 1] = 1 / A3; Dx[2, 2] = 1 / A3
+    #     Dx[end-1, end-1] = 1 / A4; Dx[end, end] = 1 / A4
+    #
+    #     S.DT[l+1][2] = spzeros(T, 2(2l+3), 2(2l+1))
+    #
+    #     S.DT[l+1][3] = spzeros(T, 2(2l+3), 2(2l+1))
+    #     Dz = S.DT[l+1][3]
+    #     ent = - recA(T, S, l, -l, 4) / (A3 * recΓ(T, S, l, -l+1, 2))
+    #     Dz[1, 3] = ent; Dz[2, 4] = ent
+    #     offset = 2
+    #     ind = 1
+    #     for m = -l:l
+    #         c = recΓ(T, S, l, m, 2)
+    #         for i = 1:2
+    #             Dz[offset+ind, ind] = 1 / c
+    #             ind += 1
+    #         end
+    #     end
+    #     # ent = - recA(T, S, l, l, 3) / (A4 * recΓ(T, S, l, l-1, 2))
+    #     # Dz[end-1, end-5] = ent; Dz[end, end-4] = ent
+    #     ent = - recA(T, S, l, l, 3) / (A4 * recΓ(T, S, l, l-1, 2))
+    #     Dz[end-1, end-3] = ent; Dz[end, end-2] = ent
+    # end
+    # S
 end
 
 function resizedata!(S::SphericalHarmonicsTangentSpace, N)
@@ -578,23 +677,29 @@ function resizedata!(S::SphericalHarmonicsTangentSpace, N)
 end
 
 
-function clenshawDTBmG(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any},
-                        l::Int, ξ::AbstractArray{R}, x::R, y::R, z::R) where {T,R}
-    """ Returns Vector corresponding to ξ * DlT * (Bl - Gl(x,y,z)) """
+function clenshawDTBmG(S::SphericalHarmonicsTangentSpace, l::Int,
+                        ξ::AbstractArray, x::Real, y::Real, z::Real)
+    """ Returns Vector corresponding to ξ * DlT * (Bl - Gl(x,y,z))
 
-    - ξ * (S.DT[l+1][1] * x + S.DT[l+1][2] * y + S.DT[l+1][3] * z)
+    Note that DT_{l,y} are zero matrices and so are discounted
+    """
+
+    ξ * (S.DT[l+1][1] * (S.B[l+1][1] - x*I)
+            + S.DT[l+1][3] * (S.B[l+1][3] - z*I))
 end
-function clenshawDTC(S::SphericalHarmonicsTangentSpace{<:Any, T, <:Any}, l::Int,
-                        ξ::AbstractArray{R}) where {T,R}
-    """ Returns Vector corresponding to ξ * DlT * Cl """
+function clenshawDTC(S::SphericalHarmonicsTangentSpace, l::Int,
+                        ξ::AbstractArray)
+    """ Returns Vector corresponding to ξ * DlT * Cl
+
+    Note that DT_{l,y} are zero matrices and so are discounted
+    """
 
     ξ * (S.DT[l+1][1] * S.C[l+1][1]
-            + S.DT[l+1][2] * S.C[l+1][2]
             + S.DT[l+1][3] * S.C[l+1][3])
 end
 function clenshaw(cfs::AbstractVector{T},
-                    S::SphericalHarmonicsTangentSpace{<:Any, B, <:Any},
-                    x::R, y::R, z::R) where {T,B,R}
+                    S::SphericalHarmonicsTangentSpace,
+                    x::Real, y::Real, z::Real) where T
     """ Implements the Clenshaw algorithm to evaluate a function given by its
     expansion coeffs in the SH OP basis
 
@@ -608,19 +713,19 @@ function clenshaw(cfs::AbstractVector{T},
     f = PseudoBlockArray(cfs, [2(2l+1) for l=0:N])
 
     if N == 0
-        return zeros(B, 3)
+        return zeros(T, 3)
     elseif N == 1
         return orderonepteval(S, x, y, z, view(f, Block(N+1)))
     end
 
-    ξ2 = view(f, Block(N+1))'
-    ξ1 = view(f, Block(N))' - clenshawDTBmG(S, N-1, ξ2, x, y, z)
+    ξ2 = transpose(view(f, Block(N+1)))
+    ξ1 = transpose(view(f, Block(N))) - clenshawDTBmG(S, N-1, ξ2, x, y, z)
     for n = N-2:-1:1
-        ξ = (view(f, Block(n+1))'
+        ξ = (transpose(view(f, Block(n+1)))
                 - clenshawDTBmG(S, n, ξ1, x, y, z)
                 - clenshawDTC(S, n+1, ξ2))
-        ξ2 = copy(ξ1)
-        ξ1 = copy(ξ)
+        ξ2 = deepcopy(ξ1)
+        ξ1 = deepcopy(ξ)
     end
     orderonepteval(S, x, y, z, ξ1)
 end
@@ -696,8 +801,8 @@ function unitcrossproductoperator(S::SphericalHarmonicsTangentSpace{<:Any, B, T}
                                     (0, 0), (1, 1))
     ind = 1
     for j = 1:(N+1)^2
-        view(ret, ind, ind+1) .= B(1)
-        view(ret, ind+1, ind) .= -B(1)
+        view(ret, ind, ind+1) .= -B(1)
+        view(ret, ind+1, ind) .= B(1)
         ind += 2
     end
     ret
@@ -705,143 +810,82 @@ end
 
 
 #===#
-# Jacobi matrices (square or otherwise)
+# Jacobi matrices
 
-function jacobiz(S::SphericalHarmonicsTangentSpace{<:Any, B, T},
-                    N::Int) where {B,T}
-    """ Returns (square) jacobi matrix for mult by z of the tangent space VSH
-        basis.
+function getjacobimat(S::SphericalHarmonicsTangentSpace{<:Any, B, T}, N::Int,
+                        kind::String; transposed::Bool=true) where {B,T}
+    """ Returns the Jacobi operator for mult by x, y or z as requested.
 
-        Matrix is transposed so as to act on the coeffs vec directly.
+        Returns as BandedBlockBanded matrix.
+        If transposed=true, the operator can be applied directly to coeffs vec.
     """
 
+    ind = 0 # repesents x, y or z
+    λ, μ = 4, 4
+    if kind == "x"
+        ind += 1
+    elseif kind == "y"
+        ind += 2
+    elseif kind == "z"
+        ind += 3
+        λ -= 2
+        μ -= 2
+    else
+        error("Invalid input kind - should be string of x, y or z only")
+    end
+
     resizedata!(S, N)
-    matind = 3 # repesents x, y or z
-    J = BandedBlockBandedMatrix(Zeros{B}(2(N+1)^2, 2(N+1)^2),
-                                [2(2l+1) for l=0:N], [2(2l+1) for l=0:N],
-                                (1, 1), (2, 2))
+    rows = cols = [2(2l+1) for l=0:N]
+    J = BandedBlockBandedMatrix(B(0)I, rows, cols, (1, 1), (λ, μ))
+
     # Assign each block
-    l = 0
-    view(J, Block(l+1, l+1)) .= transpose(S.B[l+1][matind])
-    for l = 1:N
-        view(J, Block(l+1, l)) .= transpose(S.A[l][matind])
-        view(J, Block(l+1, l+1)) .= transpose(S.B[l+1][matind])
-        view(J, Block(l, l+1)) .= transpose(S.C[l+1][matind])
+    if transposed
+        n = 0
+        view(J, Block(n+1, n+1)) .= transpose(S.B[n+1][ind])
+        for n = 1:N
+            view(J, Block(n, n+1)) .= transpose(S.C[n+1][ind])
+            view(J, Block(n+1, n+1)) .= transpose(S.B[n+1][ind])
+            view(J, Block(n+1, n)) .= transpose(S.A[n][ind])
+        end
+    else
+        n = 0
+        view(J, Block(n+1, n+1)) .= S.B[n+1][ind]
+        for n = 1:N
+            view(J, Block(n, n+1)) .= S.A[n][ind]
+            view(J, Block(n+1, n+1)) .= S.B[n+1][ind]
+            view(J, Block(n+1, n)) .= S.C[n+1][ind]
+        end
     end
     J
+end
+function jacobix(S::SphericalHarmonicsTangentSpace{<:Any, B, T}, N::Int;
+                    transposed::Bool=true) where {B,T}
+    """ Returns the Jacobi operator for mult by x as BandedBlockBanded matrix.
+
+        If transposed=true, the operator can be applied directly to coeffs vec.
+    """
+
+    getjacobimat(S, N, "x"; transposed=transposed)
+end
+function jacobiy(S::SphericalHarmonicsTangentSpace{<:Any, B, T}, N::Int;
+                    transposed::Bool=true) where {B,T}
+    """ Returns the Jacobi operator for mult by y as BandedBlockBanded matrix.
+
+        If transposed=true, the operator can be applied directly to coeffs vec.
+    """
+
+    getjacobimat(S, N, "y"; transposed=transposed)
+end
+function jacobiz(S::SphericalHarmonicsTangentSpace{<:Any, B, T}, N::Int;
+                    transposed::Bool=true) where {B,T}
+    """ Returns the Jacobi operator for mult by z as BandedBlockBanded matrix.
+
+        If transposed=true, the operator can be applied directly to coeffs vec.
+    """
+
+    getjacobimat(S, N, "z"; transposed=transposed)
 end
 
 
 
 #========#
-
-
-#
-# #====#
-# # Testing
-#
-#
-# tol = 1e-10
-#
-#
-#
-# N = 10
-# Dx = grad_sh(N, 1)
-# Dy = grad_sh(N, 2)
-# Dz = grad_sh(N, 3)
-# # I would expect this to just be diagonal (like the Laplacian)
-# D2 = Dx^2 + Dy^2 + Dz^2
-# Lap = laplacian_sh(N)
-# # D2 then matches Lap (ignoring the last 2N+1 rows/cols, since the matrices for
-# # Dx are not true representations for derivatives at these entries)
-# B = abs.(D2 - Lap)[1:end-(2N+1), 1:end-(2N+1)]
-# @test count(i->i>tol, B) == 0
-#
-# DPerpx = grad_perp_sh(N, 1)
-# DPerpy = grad_perp_sh(N, 2)
-# DPerpz = grad_perp_sh(N, 3)
-# D2Perp = DPerpx^2 + DPerpy^2 + DPerpz^2
-# # D2 then matches Lap (ignoring the last 2N+1 rows/cols, since the matrices for
-# # Dx are not true representations for derivatives at these entries)
-# B = abs.(D2Perp - Lap)[1:end-(2N+1), 1:end-(2N+1)]
-# @test count(i->i>tol, B) == 0
-#
-# ######
-#
-# x, y = 0.5, 0.1
-# z = sqrt(1 - x^2 - y^2)
-# Y = sh_eval(N, x, y, z)
-# DxY = Dx*Y
-# DPerpxY = DPerpx*Y
-# for l = 1:6
-#     for m = -l:l
-#         @test abs(x*DxY[l^2+l+1+m] - (coeff_a(l, m)*DxY[(l+1)^2+l+1+1+m+1]
-#                                         + coeff_b(l, m)*DxY[(l-1)^2+l-1+1+m+1]
-#                                         + coeff_d(l, m)*DxY[(l+1)^2+l+1+1+m-1]
-#                                         + coeff_e(l, m)*DxY[max(1,(l-1)^2+l-1+1+m-1)]
-#                                         + coeff_h(l, m)*DPerpxY[l^2+l+1+m+1]
-#                                         + coeff_j(l, m)*DPerpxY[l^2+l+1+m-1])
-#             ) < tol
-#         @test abs(y*DxY[l^2+l+1+m] - (- im * coeff_a(l, m)*DxY[(l+1)^2+l+1+1+m+1]
-#                                         - im * coeff_b(l, m)*DxY[(l-1)^2+l-1+1+m+1]
-#                                         + im * coeff_d(l, m)*DxY[(l+1)^2+l+1+1+m-1]
-#                                         + im * coeff_e(l, m)*DxY[max(1,(l-1)^2+l-1+1+m-1)]
-#                                         - im * coeff_h(l, m)*DPerpxY[l^2+l+1+m+1]
-#                                         + im * coeff_j(l, m)*DPerpxY[l^2+l+1+m-1])
-#             ) < tol
-#         @test abs(z*DxY[l^2+l+1+m] - (coeff_f(l, m)*DxY[(l+1)^2+l+1+1+m]
-#                                         + coeff_g(l, m)*DxY[max(1, (l-1)^2+l-1+1+m)]
-#                                         + coeff_k(l, m)*DPerpxY[l^2+l+1+m])
-#             ) < tol
-#
-#         @test abs(x*DPerpxY[l^2+l+1+m] - (perp_coeff_a(l, m)*DPerpxY[(l+1)^2+l+1+1+m+1]
-#                                         + perp_coeff_b(l, m)*DPerpxY[(l-1)^2+l-1+1+m+1]
-#                                         + perp_coeff_d(l, m)*DPerpxY[(l+1)^2+l+1+1+m-1]
-#                                         + perp_coeff_e(l, m)*DPerpxY[max(1,(l-1)^2+l-1+1+m-1)]
-#                                         + perp_coeff_h(l, m)*DxY[l^2+l+1+m+1]
-#                                         + perp_coeff_j(l, m)*DxY[l^2+l+1+m-1])
-#             ) < tol
-#         @test abs(y*DPerpxY[l^2+l+1+m] - (- im * perp_coeff_a(l, m)*DPerpxY[(l+1)^2+l+1+1+m+1]
-#                                             - im * perp_coeff_b(l, m)*DPerpxY[(l-1)^2+l-1+1+m+1]
-#                                             + im * perp_coeff_d(l, m)*DPerpxY[(l+1)^2+l+1+1+m-1]
-#                                             + im * perp_coeff_e(l, m)*DPerpxY[max(1,(l-1)^2+l-1+1+m-1)]
-#                                             - im * perp_coeff_h(l, m)*DxY[l^2+l+1+m+1]
-#                                             + im * perp_coeff_j(l, m)*DxY[l^2+l+1+m-1])
-#             ) < tol
-#         @test abs(z*DPerpxY[l^2+l+1+m] - (perp_coeff_f(l, m)*DPerpxY[(l+1)^2+l+1+1+m]
-#                                             + perp_coeff_g(l, m)*DPerpxY[max(1, (l-1)^2+l-1+1+m)]
-#                                             + perp_coeff_k(l, m)*DxY[l^2+l+1+m])
-#             ) < tol
-#     end
-# end
-#
-#
-# #####
-#
-#
-# # a = x*tangent_basis_eval(N,x,y,z)
-# # b = grad_Jx(N)*tangent_basis_eval(N,x,y,z)
-# # c = abs.(a[1:6N^2] - b[1:6N^2])
-# # @test count(i->i>tol, c) == 0
-# # a = y*tangent_basis_eval(N,x,y,z)
-# # b = grad_Jy(N)*tangent_basis_eval(N,x,y,z)
-# # c = abs.(a[1:6N^2] - b[1:6N^2])
-# # @test count(i->i>tol, c) == 0
-# # a = z*tangent_basis_eval(N,x,y,z)
-# # b = grad_Jz(N)*tangent_basis_eval(N,x,y,z)
-# # c = abs.(a[1:6N^2] - b[1:6N^2])
-# # @test count(i->i>tol, c) == 0
-#
-#
-# #####
-#
-#
-# N = 5
-# f = 2*ones(2(N+1)^2)
-# ∇P1 = tangent_basis_eval(N,x,y,z)
-# feval = tangent_func_eval(f,x,y,z)
-# feval_actual = zeros(3)
-# for i=1:length(f)
-#         feval_actual += f[i] * view(∇P1, Block(i))
-# end
-# @test feval_actual ≈ feval

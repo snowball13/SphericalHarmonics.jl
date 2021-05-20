@@ -42,7 +42,7 @@ struct SphericalHarmonicsTangentSpace{DF, B, T} <: Space{SphereSurface{B,T}, T}
     A::Vector{Vector{BandedBlockBandedMatrix{B}}}
     B::Vector{Vector{BandedBlockBandedMatrix{B}}}
     C::Vector{Vector{BandedBlockBandedMatrix{B}}}
-    DT::Vector{Vector{SparseMatrixCSC{B}}}
+    DT::Vector{Vector{BandedBlockBandedMatrix{B}}}
 end
 
 function SphericalHarmonicsSpace(fam::SphericalFamily{B,T}) where {B,T}
@@ -817,8 +817,8 @@ end
 
 
 function clenshawDTBmG(S::SphericalHarmonicsSpace, l::Int,
-                        ξ::AbstractArray{T}, x::R, y::R, z::R;
-                        clenshawalg::Bool=true) where {T,R}
+                        ξ::AbstractArray, x::Real, y::Real, z::Real;
+                        clenshawalg::Bool=true)
     """ Returns the vector corresponding to:
         ξ * DTl * (Bl - Gl(x,y,z)) if clenshawalg
         DTl * (Bl - Gl(x,y,z)) * ξ if !clenshawalg
@@ -853,7 +853,7 @@ function clenshawDTC(S::SphericalHarmonicsSpace, l::Int, ξ::AbstractArray;
 end
 function clenshaw(cfs::AbstractVector{T},
                     S::SphericalHarmonicsSpace,
-                    x::R, y::R, z::R) where {T,R}
+                    x::Real, y::Real, z::Real) where T
     """ Implements the Clenshaw algorithm to evaluate a function given by its
     expansion coeffs in the SH OP basis
 
@@ -889,6 +889,81 @@ evaluate(cfs::AbstractVector, S::SphericalHarmonicsSpace, x, y, z) =
     clenshaw(cfs, S, x, y, z)
 
 
+#===#
+# Jacobi matrices
+
+function getjacobimat(S::SphericalHarmonicsSpace{<:Any, B, T}, N::Int,
+                        kind::String; transposed::Bool=true) where {B,T}
+    """ Returns the Jacobi operator for mult by x, y or z as requested.
+
+        Returns as BandedBlockBanded matrix.
+        If transposed=true, the operator can be applied directly to coeffs vec.
+    """
+
+    ind = 0 # repesents x, y or z
+    λ, μ = 2, 2
+    if kind == "x"
+        ind += 1
+    elseif kind == "y"
+        ind += 2
+    elseif kind == "z"
+        ind += 3
+        λ -= 1
+        μ -= 1
+    else
+        error("Invalid input kind - should be string of x, y or z only")
+    end
+
+    resizedata!(S, N)
+    rows = cols = [2l+1 for l=0:N]
+    J = BandedBlockBandedMatrix(B(0)I, rows, cols, (1, 1), (λ, μ))
+
+    # Assign each block
+    if transposed
+        n = 0
+        # B_0 is zero, so move on
+        for n = 1:N
+            view(J, Block(n, n+1)) .= transpose(S.C[n+1][ind])
+            view(J, Block(n+1, n)) .= transpose(S.A[n][ind])
+        end
+    else
+        n = 0
+        # B_0 is zero, so move on
+        for n = 1:N
+            view(J, Block(n, n+1)) .= S.A[n][ind]
+            view(J, Block(n+1, n)) .= S.C[n+1][ind]
+        end
+    end
+    J
+end
+function jacobix(S::SphericalHarmonicsSpace{<:Any, B, T}, N::Int;
+                    transposed::Bool=true) where {B,T}
+    """ Returns the Jacobi operator for mult by x as BandedBlockBanded matrix.
+
+        If transposed=true, the operator can be applied directly to coeffs vec.
+    """
+
+    getjacobimat(S, N, "x"; transposed=transposed)
+end
+function jacobiy(S::SphericalHarmonicsSpace{<:Any, B, T}, N::Int;
+                    transposed::Bool=true) where {B,T}
+    """ Returns the Jacobi operator for mult by y as BandedBlockBanded matrix.
+
+        If transposed=true, the operator can be applied directly to coeffs vec.
+    """
+
+    getjacobimat(S, N, "y"; transposed=transposed)
+end
+function jacobiz(S::SphericalHarmonicsSpace{<:Any, B, T}, N::Int;
+                    transposed::Bool=true) where {B,T}
+    """ Returns the Jacobi operator for mult by z as BandedBlockBanded matrix.
+
+        If transposed=true, the operator can be applied directly to coeffs vec.
+    """
+
+    getjacobimat(S, N, "z"; transposed=transposed)
+end
+
 
 #===#
 # Operator matrices
@@ -911,35 +986,51 @@ function laplacianoperator(S::SphericalHarmonicsSpace{<:Any, <:Any, T}, N::Int) 
 end
 
 
+#===#
+# Convert coeffs vec length
+function convertcoeffsveclength(S::SphericalHarmonicsSpace, cfs::AbstractVector{T};
+                                    tosmall::Bool=true) where T
+    """ Returns new vector of the truncated (tosmall=true) or extended
+    (tosmall=false) coeffs.
 
-# #-----
-# # Testing
-#
-# x = 0.1
-# y = 0.8
-# z = sqrt(1 - x^2 - y^2)
-# l,m = 3,-1
-# p = sh_eval(l, m, x, y, z)
-# p_actual = alphaVal(l,m) * (x - im*y) * ((z-1)^2 * 15/4 + (z-1) * 15/2 + 3)
-# # p_actual = alphaVal(2,2) * (x + im*y)^2
-# @test p ≈ p_actual
-#
-# N = 10
-# f = 1:(N+1)^2
-# fxyz = func_eval(f, x, y, z)
-# p = sh_eval(N, x, y, z)
-# fxyz_actual = 0.0
-# for k = 0:N
-#     fxyz_actual += vecdot(view(f, k^2+1:(k+1)^2), view(p, k^2+1:(k+1)^2))
+    This is the action of the operator E as given in the thesis.
+    """
+    if tosmall
+        len = Int(length(cfs) / 2)
+        ret = zeros(T, len)
+        for i = 1:len
+            ret[i] = cfs[2i - 1]
+        end
+    else
+        len = length(cfs)
+        ret = zeros(T, 2len)
+        for i = 1:len
+            ret[2i - 1] = cfs[i]
+        end
+    end
+    ret
+end
+
+
+#===#
+# Inner products and norms
+
+function inner(::Type{T}, S::SphericalHarmonicsSpace, fpts, gpts, w) where T
+    m = length(w)
+    T(sum((fpts[1:m] .* conj.(gpts[1:m]) + fpts[m+1:end] .* conj.(gpts[m+1:end])) .* w) / 2)
+end
+inner(S::SphericalHarmonicsSpace{<:Any, B, <:Any}, fpts, gpts, w) where B =
+    inner(B, S, fpts, gpts, w)
+# function inner(::Type{T}, S::SphericalHarmonicsSpace, f::Fun, g::Fun, N::Int) where T
+#     n = Int(ceil((N+1)^2 / 2))
+#     p, w = pointswithweights(S, n)
+#     fpts = [f(pt) for pt in p]
+#     gpts = [g(pt) for pt in p]
+#     inner(T, S, fpts, gpts, w)
 # end
-# fxyz_actual
-# @test fxyz ≈ fxyz_actual
-#
-# N = 5
-# f = 1:(N+1)^2
-# fxyz = func_eval_jacobi(f)
-#
-# a = y*sh_eval(N,x,y,z)
-# b = Jy(N)*sh_eval(N,x,y,z)
-# (a - b)[1:N^2]
-# @test a[1:N^2]≈b[1:N^2]
+# inner(S::SphericalHarmonicsSpace{<:Any, B, <:Any}, f::Fun, g::Fun, N::Int) where B =
+#     inner(B, S, f, g, N)
+# norm(S::SphericalHarmonicsSpace{<:Any, <:Any, T}, fpts, w::AbstractArray) where T =
+#     sqrt(inner(T, S, fpts, fpts, w))
+# norm(S::SphericalHarmonicsSpace{<:Any, <:Any, T}, f::Fun, N::Int) where T =
+#     sqrt(inner(T, S, f, f, 2N))
